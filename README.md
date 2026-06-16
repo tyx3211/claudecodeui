@@ -222,6 +222,11 @@ Append-only JSONL audit logs are written under
 prompt, target session, project path, model, permission mode, streamed events,
 and final session id.
 
+When resuming an existing Claude Code session, use the same project path that
+created that session. Claude Code can return "No conversation found with session
+ID" when a valid CloudCLI session id is resumed under a different project path;
+the CLI surfaces those provider error events on stderr and exits non-zero.
+
 ### Enabling Tools
 
 To use Claude Code's full functionality, you'll need to manually enable tools:

@@ -25,6 +25,7 @@ type SseResult = {
   readonly latestSessionId: string | null;
   readonly assistantTextLength: number;
   readonly completeExitCode: number | null;
+  readonly errorMessages: readonly string[];
 };
 
 const PERMISSION_MODES = new Set<PermissionMode>([
@@ -240,6 +241,22 @@ function readCompleteExitCode(event: AgentEvent): number | null {
   return typeof event.exitCode === 'number' && Number.isInteger(event.exitCode) ? event.exitCode : null;
 }
 
+function readErrorMessage(event: AgentEvent): string | null {
+  if (event.kind !== 'error') {
+    return null;
+  }
+
+  if (typeof event.content === 'string' && event.content.trim()) {
+    return event.content;
+  }
+
+  if (typeof event.message === 'string' && event.message.trim()) {
+    return event.message;
+  }
+
+  return 'Claude Code returned an error event without a message.';
+}
+
 async function writeAudit(auditPath: string, value: unknown): Promise<void> {
   await appendFile(auditPath, stringifyJsonLine(value), 'utf8');
 }
@@ -278,6 +295,7 @@ async function consumeSseResponse(
   const assistantTextById = new Map<string, string>();
   let assistantTextLength = 0;
   let completeExitCode: number | null = null;
+  const errorMessages: string[] = [];
 
   const processBlock = async (block: string): Promise<void> => {
     const data = block
@@ -300,6 +318,11 @@ async function consumeSseResponse(
     const eventExitCode = readCompleteExitCode(event);
     if (eventExitCode !== null) {
       completeExitCode = eventExitCode;
+    }
+
+    const errorMessage = readErrorMessage(event);
+    if (errorMessage) {
+      errorMessages.push(errorMessage);
     }
 
     await writeAudit(auditPath, {
@@ -354,6 +377,7 @@ async function consumeSseResponse(
     latestSessionId,
     assistantTextLength,
     completeExitCode,
+    errorMessages,
   };
 }
 
@@ -404,7 +428,7 @@ async function appendToClaudeSession(options: AppendOptions): Promise<void> {
     throw new Error(`CloudCLI /api/agent failed with ${response.status}: ${body}`);
   }
 
-  const { latestSessionId, assistantTextLength, completeExitCode } = await consumeSseResponse(
+  const { latestSessionId, assistantTextLength, completeExitCode, errorMessages } = await consumeSseResponse(
     response,
     auditPath,
     options.jsonl,
@@ -417,11 +441,20 @@ async function appendToClaudeSession(options: AppendOptions): Promise<void> {
     sessionId: latestSessionId,
     completeExitCode,
     assistantTextLength,
+    errorMessages,
   });
 
   process.stderr.write(`audit: ${auditPath}\n`);
   if (latestSessionId) {
     process.stderr.write(`sessionId: ${latestSessionId}\n`);
+  }
+
+  if (errorMessages.length > 0) {
+    throw new Error(`Claude Code error: ${errorMessages.join('\n')}`);
+  }
+
+  if (completeExitCode !== null && completeExitCode !== 0) {
+    throw new Error(`Claude Code exited with status ${completeExitCode}.`);
   }
 }
 
