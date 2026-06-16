@@ -109,7 +109,9 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
   let baseUrl = process.env.CLOUDCLI_BASE_URL || DEFAULT_BASE_URL;
   let apiKey = process.env.CLOUDCLI_API_KEY || '';
   let apiKeyFile = process.env.CLOUDCLI_API_KEY_FILE || DEFAULT_API_KEY_FILE;
-  let projectPath = '';
+  let projectPath = process.cwd();
+  let hasCwd = false;
+  let hasProjectPath = false;
   let sessionId: string | null = null;
   let message = '';
   let messageFile = '';
@@ -137,7 +139,21 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
         index += 1;
         break;
       case '--project-path':
-        projectPath = expandHome(requireValue(argv, index, arg));
+        if (hasCwd) {
+          throw new Error('--project-path cannot be combined with --cwd.');
+        }
+
+        projectPath = resolveOutputPath(requireValue(argv, index, arg));
+        hasProjectPath = true;
+        index += 1;
+        break;
+      case '--cwd':
+        if (hasProjectPath) {
+          throw new Error('--cwd cannot be combined with --project-path.');
+        }
+
+        projectPath = resolveOutputPath(requireValue(argv, index, arg));
+        hasCwd = true;
         index += 1;
         break;
       case '--session-id':
@@ -184,10 +200,6 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
     apiKey = await readApiKeyFromFile(apiKeyFile);
   }
 
-  if (!projectPath) {
-    throw new Error('--project-path is required.');
-  }
-
   if (messageFile) {
     message = await readUtf8File(messageFile);
   }
@@ -199,7 +211,7 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
   return {
     baseUrl: baseUrl.replace(/\/+$/, ''),
     apiKey,
-    projectPath,
+    projectPath: normalizePathForCompare(projectPath),
     sessionId,
     message,
     model,
@@ -231,6 +243,10 @@ function parseSessionInfoOptions(argv: readonly string[]): SessionInfoOptions {
       case '--json':
         json = true;
         break;
+      case '--help':
+      case '-h':
+        printUsage(process.stdout);
+        process.exit(0);
       default:
         throw new Error(`unknown option: ${arg}`);
     }
@@ -318,7 +334,7 @@ function validateSessionProject(options: AppendOptions): void {
       [
         `Session/project mismatch for ${options.sessionId}.`,
         `CloudCLI session projectPath: ${sessionInfo.projectPath}`,
-        `Requested --project-path: ${options.projectPath}`,
+        `Requested working directory: ${options.projectPath}`,
         'Use the session projectPath above, or create/find a Claude Code session for the requested project.',
       ].join('\n'),
     );
@@ -589,10 +605,14 @@ function printSessionInfo(options: SessionInfoOptions): void {
   process.stdout.write(options.json ? stringifyJsonLine(sessionInfo) : `${formatSessionInfo(sessionInfo)}\n`);
 }
 
-function printUsage(): void {
-  process.stderr.write(`Usage:
-  npm run claude-subagent -- append --project-path <path> [--session-id <uuid>] (--message <text> | --message-file <path>)
-  npm run claude-subagent -- compact --project-path <path> --session-id <uuid>
+function hasHelpArg(args: readonly string[]): boolean {
+  return args.includes('--help') || args.includes('-h');
+}
+
+function printUsage(output: typeof process.stdout | typeof process.stderr): void {
+  output.write(`Usage:
+  npm run claude-subagent -- append [--cwd <path>] [--session-id <uuid>] (--message <text> | --message-file <path>)
+  npm run claude-subagent -- compact [--cwd <path>] --session-id <uuid>
   npm run claude-subagent -- session-info --session-id <uuid>
 
 Options:
@@ -600,6 +620,8 @@ Options:
   --api-key <key>             CloudCLI API key. Prefer CLOUDCLI_API_KEY or --api-key-file.
   --api-key-file <path>       API key file. Default: ${DEFAULT_API_KEY_FILE}
   --auth-db-path <path>       CloudCLI auth database. Default: ${DEFAULT_AUTH_DB_PATH}
+  --cwd <path>                Claude Code working directory. Defaults to current process cwd.
+  --project-path <path>       Alias for --cwd, kept for CloudCLI compatibility.
   --model <model>             Claude model alias. Default: sonnet
   --permission-mode <mode>    Claude Code permission mode. Default: bypassPermissions
   --audit-dir <path>          JSONL audit directory. Default: ${DEFAULT_AUDIT_DIR}
@@ -611,9 +633,20 @@ Options:
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
+  if (!command || command === '--help' || command === '-h') {
+    printUsage(process.stdout);
+    process.exitCode = 0;
+    return;
+  }
+
   if (command !== 'append' && command !== 'compact' && command !== 'session-info') {
-    printUsage();
-    process.exitCode = command ? 1 : 0;
+    printUsage(process.stderr);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (hasHelpArg(args)) {
+    printUsage(process.stdout);
     return;
   }
 

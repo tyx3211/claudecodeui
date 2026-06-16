@@ -197,7 +197,7 @@ Claude Code session through CloudCLI instead of calling `claude` directly:
 
 ```bash
 CLOUDCLI_API_KEY=<ck_...> npm run claude-subagent -- append \
-  --project-path /path/to/project \
+  --cwd /path/to/project \
   --session-id <claude-session-id> \
   --message-file /path/to/prompt.md
 ```
@@ -213,7 +213,7 @@ The CLI also supports manual compaction of an existing Claude Code session:
 
 ```bash
 CLOUDCLI_API_KEY=<ck_...> npm run claude-subagent -- compact \
-  --project-path /path/to/project \
+  --cwd /path/to/project \
   --session-id <claude-session-id>
 ```
 
@@ -234,8 +234,10 @@ created that session. Claude Code can return "No conversation found with session
 ID" when a valid CloudCLI session id is resumed under a different project path;
 the CLI now checks the local CloudCLI auth database before dispatch when
 `--session-id` is present, reports the expected project path on mismatch, and
-exits non-zero. Provider error events are also surfaced on stderr and exit
-non-zero.
+exits non-zero. Use `--cwd` to set this working directory explicitly;
+`--project-path` remains as a compatibility alias. If neither is provided, the
+CLI uses the process current working directory. Provider error events are also
+surfaced on stderr and exit non-zero.
 
 ### Enabling Tools
 
