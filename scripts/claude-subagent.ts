@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -16,6 +16,7 @@ type AppendOptions = {
   readonly permissionMode: PermissionMode;
   readonly auditDir: string;
   readonly jsonl: boolean;
+  readonly stdoutFile: string | null;
 };
 
 type AgentEvent = Record<string, unknown>;
@@ -49,6 +50,10 @@ function expandHome(inputPath: string): string {
   }
 
   return inputPath;
+}
+
+function resolveOutputPath(inputPath: string): string {
+  return path.resolve(expandHome(inputPath));
 }
 
 function requireValue(argv: readonly string[], index: number, option: string): string {
@@ -93,6 +98,7 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
   let permissionMode: PermissionMode = 'bypassPermissions';
   let auditDir = process.env.CLOUDCLI_SUBAGENT_AUDIT_DIR || DEFAULT_AUDIT_DIR;
   let jsonl = false;
+  let stdoutFile: string | null = null;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -141,6 +147,10 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
       case '--jsonl':
         jsonl = true;
         break;
+      case '--stdout-file':
+        stdoutFile = resolveOutputPath(requireValue(argv, index, arg));
+        index += 1;
+        break;
       default:
         throw new Error(`unknown option: ${arg}`);
     }
@@ -172,6 +182,7 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
     permissionMode,
     auditDir,
     jsonl,
+    stdoutFile,
   };
 }
 
@@ -233,7 +244,29 @@ async function writeAudit(auditPath: string, value: unknown): Promise<void> {
   await appendFile(auditPath, stringifyJsonLine(value), 'utf8');
 }
 
-async function consumeSseResponse(response: Response, auditPath: string, jsonl: boolean): Promise<SseResult> {
+async function prepareStdoutFile(stdoutFile: string | null): Promise<void> {
+  if (!stdoutFile) {
+    return;
+  }
+
+  await mkdir(path.dirname(stdoutFile), { recursive: true });
+  await writeFile(stdoutFile, '', 'utf8');
+}
+
+async function writeStdout(text: string, stdoutFile: string | null): Promise<void> {
+  process.stdout.write(text);
+
+  if (stdoutFile) {
+    await appendFile(stdoutFile, text, 'utf8');
+  }
+}
+
+async function consumeSseResponse(
+  response: Response,
+  auditPath: string,
+  jsonl: boolean,
+  stdoutFile: string | null,
+): Promise<SseResult> {
   if (!response.body) {
     throw new Error('CloudCLI response has no body.');
   }
@@ -276,7 +309,7 @@ async function consumeSseResponse(response: Response, auditPath: string, jsonl: 
     });
 
     if (jsonl) {
-      process.stdout.write(stringifyJsonLine(event));
+      await writeStdout(stringifyJsonLine(event), stdoutFile);
       return;
     }
 
@@ -292,7 +325,7 @@ async function consumeSseResponse(response: Response, auditPath: string, jsonl: 
     assistantTextById.set(assistantText.id, assistantText.content);
 
     if (textToPrint) {
-      process.stdout.write(textToPrint.endsWith('\n') ? textToPrint : `${textToPrint}\n`);
+      await writeStdout(textToPrint.endsWith('\n') ? textToPrint : `${textToPrint}\n`, stdoutFile);
       assistantTextLength += textToPrint.length;
     }
   };
@@ -326,6 +359,7 @@ async function consumeSseResponse(response: Response, auditPath: string, jsonl: 
 
 async function appendToClaudeSession(options: AppendOptions): Promise<void> {
   await mkdir(options.auditDir, { recursive: true });
+  await prepareStdoutFile(options.stdoutFile);
   const auditPath = path.join(options.auditDir, `${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`);
 
   const requestBody = {
@@ -370,7 +404,12 @@ async function appendToClaudeSession(options: AppendOptions): Promise<void> {
     throw new Error(`CloudCLI /api/agent failed with ${response.status}: ${body}`);
   }
 
-  const { latestSessionId, assistantTextLength, completeExitCode } = await consumeSseResponse(response, auditPath, options.jsonl);
+  const { latestSessionId, assistantTextLength, completeExitCode } = await consumeSseResponse(
+    response,
+    auditPath,
+    options.jsonl,
+    options.stdoutFile,
+  );
   await writeAudit(auditPath, {
     ts: new Date().toISOString(),
     direction: 'codex_local',
@@ -399,6 +438,7 @@ Options:
   --permission-mode <mode>    Claude Code permission mode. Default: bypassPermissions
   --audit-dir <path>          JSONL audit directory. Default: ${DEFAULT_AUDIT_DIR}
   --jsonl                     Print raw event JSONL instead of assistant Markdown text.
+  --stdout-file <path>        Also write stdout output to this UTF-8 file.
 `);
 }
 

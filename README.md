@@ -205,7 +205,9 @@ CLOUDCLI_API_KEY=<ck_...> npm run claude-subagent -- append \
 By default, stdout only contains Claude Code's visible assistant Markdown text
 events (`kind: "text"`, `role: "assistant"`). Reasoning, status events, tool
 calls, and tool results are filtered from stdout. Pass `--jsonl` when raw
-CloudCLI events are needed.
+CloudCLI events are needed. Pass `--stdout-file /path/to/output.md` to mirror
+the exact stdout stream into a UTF-8 file for Codex-side audit review; stderr
+metadata such as the audit path and session id is not written to that file.
 
 The CLI also supports manual compaction of an existing Claude Code session:
 
