@@ -20,6 +20,12 @@ type AppendOptions = {
 
 type AgentEvent = Record<string, unknown>;
 
+type SseResult = {
+  readonly latestSessionId: string | null;
+  readonly assistantTextLength: number;
+  readonly completeExitCode: number | null;
+};
+
 const PERMISSION_MODES = new Set<PermissionMode>([
   'acceptEdits',
   'auto',
@@ -169,34 +175,21 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
   };
 }
 
-function stringifyJsonLine(value: unknown): string {
-  return `${JSON.stringify(value)}\n`;
+function assertNoMessageOptions(argv: readonly string[], command: string): void {
+  for (const arg of argv) {
+    if (arg === '--message' || arg === '--message-file') {
+      throw new Error(`${command} does not accept ${arg}; it sends /compact itself.`);
+    }
+  }
 }
 
-function extractTextParts(value: unknown, depth = 0): string[] {
-  if (depth > 4 || value === null || value === undefined) {
-    return [];
-  }
+async function parseCompactOptions(argv: readonly string[]): Promise<AppendOptions> {
+  assertNoMessageOptions(argv, 'compact');
+  return await parseAppendOptions([...argv, '--message', '/compact']);
+}
 
-  if (typeof value === 'string') {
-    return value.trim() ? [value] : [];
-  }
-
-  if (Array.isArray(value)) {
-    return value.flatMap((item) => extractTextParts(item, depth + 1));
-  }
-
-  if (typeof value !== 'object') {
-    return [];
-  }
-
-  const record = value as Record<string, unknown>;
-  const directText = typeof record.text === 'string' ? [record.text] : [];
-  const contentText = typeof record.content === 'string' ? [record.content] : extractTextParts(record.content, depth + 1);
-  const messageText = extractTextParts(record.message, depth + 1);
-  const dataText = extractTextParts(record.data, depth + 1);
-
-  return [...directText, ...contentText, ...messageText, ...dataText].filter((text) => text.trim().length > 0);
+function stringifyJsonLine(value: unknown): string {
+  return `${JSON.stringify(value)}\n`;
 }
 
 function readSessionIdFromEvent(event: AgentEvent): string | null {
@@ -216,11 +209,31 @@ function readSessionIdFromEvent(event: AgentEvent): string | null {
   return null;
 }
 
+function readAssistantTextEvent(event: AgentEvent): { readonly id: string; readonly content: string } | null {
+  if (event.kind !== 'text' || event.role !== 'assistant' || typeof event.content !== 'string') {
+    return null;
+  }
+
+  const id = typeof event.id === 'string' && event.id.trim() ? event.id : 'assistant-text';
+  return {
+    id,
+    content: event.content,
+  };
+}
+
+function readCompleteExitCode(event: AgentEvent): number | null {
+  if (event.kind !== 'complete') {
+    return null;
+  }
+
+  return typeof event.exitCode === 'number' && Number.isInteger(event.exitCode) ? event.exitCode : null;
+}
+
 async function writeAudit(auditPath: string, value: unknown): Promise<void> {
   await appendFile(auditPath, stringifyJsonLine(value), 'utf8');
 }
 
-async function consumeSseResponse(response: Response, auditPath: string, jsonl: boolean): Promise<string | null> {
+async function consumeSseResponse(response: Response, auditPath: string, jsonl: boolean): Promise<SseResult> {
   if (!response.body) {
     throw new Error('CloudCLI response has no body.');
   }
@@ -229,6 +242,9 @@ async function consumeSseResponse(response: Response, auditPath: string, jsonl: 
   const decoder = new TextDecoder();
   let buffer = '';
   let latestSessionId: string | null = null;
+  const assistantTextById = new Map<string, string>();
+  let assistantTextLength = 0;
+  let completeExitCode: number | null = null;
 
   const processBlock = async (block: string): Promise<void> => {
     const data = block
@@ -248,6 +264,11 @@ async function consumeSseResponse(response: Response, auditPath: string, jsonl: 
       latestSessionId = eventSessionId;
     }
 
+    const eventExitCode = readCompleteExitCode(event);
+    if (eventExitCode !== null) {
+      completeExitCode = eventExitCode;
+    }
+
     await writeAudit(auditPath, {
       ts: new Date().toISOString(),
       direction: 'cloudcli_to_codex',
@@ -259,8 +280,20 @@ async function consumeSseResponse(response: Response, auditPath: string, jsonl: 
       return;
     }
 
-    for (const text of extractTextParts(event)) {
-      process.stdout.write(`${text}\n`);
+    const assistantText = readAssistantTextEvent(event);
+    if (!assistantText) {
+      return;
+    }
+
+    const previousText = assistantTextById.get(assistantText.id) ?? '';
+    const textToPrint = assistantText.content.startsWith(previousText)
+      ? assistantText.content.slice(previousText.length)
+      : assistantText.content;
+    assistantTextById.set(assistantText.id, assistantText.content);
+
+    if (textToPrint) {
+      process.stdout.write(textToPrint.endsWith('\n') ? textToPrint : `${textToPrint}\n`);
+      assistantTextLength += textToPrint.length;
     }
   };
 
@@ -284,7 +317,11 @@ async function consumeSseResponse(response: Response, auditPath: string, jsonl: 
     await processBlock(buffer);
   }
 
-  return latestSessionId;
+  return {
+    latestSessionId,
+    assistantTextLength,
+    completeExitCode,
+  };
 }
 
 async function appendToClaudeSession(options: AppendOptions): Promise<void> {
@@ -333,12 +370,14 @@ async function appendToClaudeSession(options: AppendOptions): Promise<void> {
     throw new Error(`CloudCLI /api/agent failed with ${response.status}: ${body}`);
   }
 
-  const latestSessionId = await consumeSseResponse(response, auditPath, options.jsonl);
+  const { latestSessionId, assistantTextLength, completeExitCode } = await consumeSseResponse(response, auditPath, options.jsonl);
   await writeAudit(auditPath, {
     ts: new Date().toISOString(),
     direction: 'codex_local',
     done: true,
     sessionId: latestSessionId,
+    completeExitCode,
+    assistantTextLength,
   });
 
   process.stderr.write(`audit: ${auditPath}\n`);
@@ -350,6 +389,7 @@ async function appendToClaudeSession(options: AppendOptions): Promise<void> {
 function printUsage(): void {
   process.stderr.write(`Usage:
   npm run claude-subagent -- append --project-path <path> [--session-id <uuid>] (--message <text> | --message-file <path>)
+  npm run claude-subagent -- compact --project-path <path> --session-id <uuid>
 
 Options:
   --base-url <url>            CloudCLI base URL. Default: ${DEFAULT_BASE_URL}
@@ -358,19 +398,19 @@ Options:
   --model <model>             Claude model alias. Default: sonnet
   --permission-mode <mode>    Claude Code permission mode. Default: bypassPermissions
   --audit-dir <path>          JSONL audit directory. Default: ${DEFAULT_AUDIT_DIR}
-  --jsonl                     Print raw event JSONL instead of extracted text.
+  --jsonl                     Print raw event JSONL instead of assistant Markdown text.
 `);
 }
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
-  if (command !== 'append') {
+  if (command !== 'append' && command !== 'compact') {
     printUsage();
     process.exitCode = command ? 1 : 0;
     return;
   }
 
-  const options = await parseAppendOptions(args);
+  const options = command === 'compact' ? await parseCompactOptions(args) : await parseAppendOptions(args);
   await appendToClaudeSession(options);
 }
 

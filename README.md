@@ -172,7 +172,7 @@ The deployment is intended to use Claude Code settings such as:
   "apiKeyHelper": "tr -d '\\r\\n' < /path/to/deepseek-ft-api-key.txt",
   "env": {
     "ANTHROPIC_BASE_URL": "https://llm-proxy.ftai.chat",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash[1m]",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro[1m]",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro[1m]"
   }
@@ -202,10 +202,23 @@ CLOUDCLI_API_KEY=<ck_...> npm run claude-subagent -- append \
   --message-file /path/to/prompt.md
 ```
 
-The CLI streams CloudCLI events to stdout and writes append-only JSONL audit logs
-under `~/experiment/cloudcli-subagent-audit` by default. The audit log records
-the prompt, target session, project path, model, permission mode, streamed
-events, and final session id.
+By default, stdout only contains Claude Code's visible assistant Markdown text
+events (`kind: "text"`, `role: "assistant"`). Reasoning, status events, tool
+calls, and tool results are filtered from stdout. Pass `--jsonl` when raw
+CloudCLI events are needed.
+
+The CLI also supports manual compaction of an existing Claude Code session:
+
+```bash
+CLOUDCLI_API_KEY=<ck_...> npm run claude-subagent -- compact \
+  --project-path /path/to/project \
+  --session-id <claude-session-id>
+```
+
+Append-only JSONL audit logs are written under
+`~/experiment/cloudcli-subagent-audit` by default. The audit log records the
+prompt, target session, project path, model, permission mode, streamed events,
+and final session id.
 
 ### Enabling Tools
 
