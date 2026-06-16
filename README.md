@@ -217,6 +217,13 @@ CLOUDCLI_API_KEY=<ck_...> npm run claude-subagent -- compact \
   --session-id <claude-session-id>
 ```
 
+To inspect the project path bound to a CloudCLI session id:
+
+```bash
+npm run claude-subagent -- session-info \
+  --session-id <claude-session-id>
+```
+
 Append-only JSONL audit logs are written under
 `~/experiment/cloudcli-subagent-audit` by default. The audit log records the
 prompt, target session, project path, model, permission mode, streamed events,
@@ -225,7 +232,10 @@ and final session id.
 When resuming an existing Claude Code session, use the same project path that
 created that session. Claude Code can return "No conversation found with session
 ID" when a valid CloudCLI session id is resumed under a different project path;
-the CLI surfaces those provider error events on stderr and exits non-zero.
+the CLI now checks the local CloudCLI auth database before dispatch when
+`--session-id` is present, reports the expected project path on mismatch, and
+exits non-zero. Provider error events are also surfaced on stderr and exit
+non-zero.
 
 ### Enabling Tools
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env tsx
+import Database from 'better-sqlite3';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -17,9 +19,24 @@ type AppendOptions = {
   readonly auditDir: string;
   readonly jsonl: boolean;
   readonly stdoutFile: string | null;
+  readonly authDbPath: string;
 };
 
 type AgentEvent = Record<string, unknown>;
+
+type SessionInfoOptions = {
+  readonly sessionId: string;
+  readonly authDbPath: string;
+  readonly json: boolean;
+};
+
+type SessionInfo = {
+  readonly sessionId: string;
+  readonly provider: string;
+  readonly customName: string | null;
+  readonly projectPath: string;
+  readonly updatedAt: string | null;
+};
 
 type SseResult = {
   readonly latestSessionId: string | null;
@@ -40,6 +57,7 @@ const PERMISSION_MODES = new Set<PermissionMode>([
 const DEFAULT_BASE_URL = 'http://127.0.0.1:31783';
 const DEFAULT_API_KEY_FILE = path.join(os.homedir(), 'experiment', 'cloudcli-data', 'codex-subagent-api-key');
 const DEFAULT_AUDIT_DIR = path.join(os.homedir(), 'experiment', 'cloudcli-subagent-audit');
+const DEFAULT_AUTH_DB_PATH = path.join(os.homedir(), 'experiment', 'cloudcli-data', 'auth.db');
 
 function expandHome(inputPath: string): string {
   if (inputPath === '~') {
@@ -100,6 +118,7 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
   let auditDir = process.env.CLOUDCLI_SUBAGENT_AUDIT_DIR || DEFAULT_AUDIT_DIR;
   let jsonl = false;
   let stdoutFile: string | null = null;
+  let authDbPath = process.env.CLOUDCLI_AUTH_DB_PATH || DEFAULT_AUTH_DB_PATH;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -152,6 +171,10 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
         stdoutFile = resolveOutputPath(requireValue(argv, index, arg));
         index += 1;
         break;
+      case '--auth-db-path':
+        authDbPath = resolveOutputPath(requireValue(argv, index, arg));
+        index += 1;
+        break;
       default:
         throw new Error(`unknown option: ${arg}`);
     }
@@ -184,6 +207,43 @@ async function parseAppendOptions(argv: readonly string[]): Promise<AppendOption
     auditDir,
     jsonl,
     stdoutFile,
+    authDbPath,
+  };
+}
+
+function parseSessionInfoOptions(argv: readonly string[]): SessionInfoOptions {
+  let sessionId = '';
+  let authDbPath = process.env.CLOUDCLI_AUTH_DB_PATH || DEFAULT_AUTH_DB_PATH;
+  let json = false;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+
+    switch (arg) {
+      case '--session-id':
+        sessionId = requireValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--auth-db-path':
+        authDbPath = resolveOutputPath(requireValue(argv, index, arg));
+        index += 1;
+        break;
+      case '--json':
+        json = true;
+        break;
+      default:
+        throw new Error(`unknown option: ${arg}`);
+    }
+  }
+
+  if (!sessionId.trim()) {
+    throw new Error('--session-id is required.');
+  }
+
+  return {
+    sessionId,
+    authDbPath,
+    json,
   };
 }
 
@@ -202,6 +262,67 @@ async function parseCompactOptions(argv: readonly string[]): Promise<AppendOptio
 
 function stringifyJsonLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
+}
+
+function normalizePathForCompare(inputPath: string): string {
+  return path.resolve(expandHome(inputPath));
+}
+
+function readSessionInfo(authDbPath: string, sessionId: string): SessionInfo | null {
+  const db = new Database(authDbPath, { readonly: true, fileMustExist: true });
+
+  try {
+    const row = db
+      .prepare(
+        `select session_id as sessionId,
+                provider,
+                custom_name as customName,
+                project_path as projectPath,
+                updated_at as updatedAt
+           from sessions
+          where session_id = ?`,
+      )
+      .get(sessionId) as SessionInfo | undefined;
+
+    return row ?? null;
+  }
+  finally {
+    db.close();
+  }
+}
+
+function formatSessionInfo(sessionInfo: SessionInfo): string {
+  return [
+    `sessionId: ${sessionInfo.sessionId}`,
+    `provider: ${sessionInfo.provider}`,
+    `customName: ${sessionInfo.customName ?? ''}`,
+    `projectPath: ${sessionInfo.projectPath}`,
+    `updatedAt: ${sessionInfo.updatedAt ?? ''}`,
+  ].join('\n');
+}
+
+function validateSessionProject(options: AppendOptions): void {
+  if (!options.sessionId || !existsSync(options.authDbPath)) {
+    return;
+  }
+
+  const sessionInfo = readSessionInfo(options.authDbPath, options.sessionId);
+  if (!sessionInfo) {
+    throw new Error(`No CloudCLI session row found for session id ${options.sessionId} in ${options.authDbPath}.`);
+  }
+
+  const requestedProjectPath = normalizePathForCompare(options.projectPath);
+  const sessionProjectPath = normalizePathForCompare(sessionInfo.projectPath);
+  if (requestedProjectPath !== sessionProjectPath) {
+    throw new Error(
+      [
+        `Session/project mismatch for ${options.sessionId}.`,
+        `CloudCLI session projectPath: ${sessionInfo.projectPath}`,
+        `Requested --project-path: ${options.projectPath}`,
+        'Use the session projectPath above, or create/find a Claude Code session for the requested project.',
+      ].join('\n'),
+    );
+  }
 }
 
 function readSessionIdFromEvent(event: AgentEvent): string | null {
@@ -382,6 +503,7 @@ async function consumeSseResponse(
 }
 
 async function appendToClaudeSession(options: AppendOptions): Promise<void> {
+  validateSessionProject(options);
   await mkdir(options.auditDir, { recursive: true });
   await prepareStdoutFile(options.stdoutFile);
   const auditPath = path.join(options.auditDir, `${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`);
@@ -458,28 +580,45 @@ async function appendToClaudeSession(options: AppendOptions): Promise<void> {
   }
 }
 
+function printSessionInfo(options: SessionInfoOptions): void {
+  const sessionInfo = readSessionInfo(options.authDbPath, options.sessionId);
+  if (!sessionInfo) {
+    throw new Error(`No CloudCLI session row found for session id ${options.sessionId} in ${options.authDbPath}.`);
+  }
+
+  process.stdout.write(options.json ? stringifyJsonLine(sessionInfo) : `${formatSessionInfo(sessionInfo)}\n`);
+}
+
 function printUsage(): void {
   process.stderr.write(`Usage:
   npm run claude-subagent -- append --project-path <path> [--session-id <uuid>] (--message <text> | --message-file <path>)
   npm run claude-subagent -- compact --project-path <path> --session-id <uuid>
+  npm run claude-subagent -- session-info --session-id <uuid>
 
 Options:
   --base-url <url>            CloudCLI base URL. Default: ${DEFAULT_BASE_URL}
   --api-key <key>             CloudCLI API key. Prefer CLOUDCLI_API_KEY or --api-key-file.
   --api-key-file <path>       API key file. Default: ${DEFAULT_API_KEY_FILE}
+  --auth-db-path <path>       CloudCLI auth database. Default: ${DEFAULT_AUTH_DB_PATH}
   --model <model>             Claude model alias. Default: sonnet
   --permission-mode <mode>    Claude Code permission mode. Default: bypassPermissions
   --audit-dir <path>          JSONL audit directory. Default: ${DEFAULT_AUDIT_DIR}
   --jsonl                     Print raw event JSONL instead of assistant Markdown text.
+  --json                      Print session-info output as JSON.
   --stdout-file <path>        Also write stdout output to this UTF-8 file.
 `);
 }
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
-  if (command !== 'append' && command !== 'compact') {
+  if (command !== 'append' && command !== 'compact' && command !== 'session-info') {
     printUsage();
     process.exitCode = command ? 1 : 0;
+    return;
+  }
+
+  if (command === 'session-info') {
+    printSessionInfo(parseSessionInfoOptions(args));
     return;
   }
 
