@@ -78,6 +78,21 @@ export class ClaudeProviderAuth implements IProviderAuth {
   }
 
   /**
+   * Reads top-level Claude settings values. Claude Code supports `apiKeyHelper`
+   * outside of the `env` block, so provider auth checks must inspect both
+   * locations instead of only looking for direct environment variables.
+   */
+  private async loadSettings(): Promise<Record<string, unknown>> {
+    try {
+      const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+      const content = await readFile(settingsPath, 'utf8');
+      return readObjectRecord(JSON.parse(content)) ?? {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
    * Checks Claude credentials in the same priority order used by Claude Code.
    */
   private async checkCredentials(): Promise<ClaudeCredentialsStatus> {
@@ -89,6 +104,11 @@ export class ClaudeProviderAuth implements IProviderAuth {
 
     if (process.env.ANTHROPIC_API_KEY?.trim()) {
       return { authenticated: true, email: 'API Key Auth', method: 'api_key' };
+    }
+
+    const settings = await this.loadSettings();
+    if (readOptionalString(settings.apiKeyHelper)) {
+      return { authenticated: true, email: 'Configured via apiKeyHelper', method: 'api_key_helper' };
     }
 
     const settingsEnv = await this.loadSettingsEnv();

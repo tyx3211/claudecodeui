@@ -1692,9 +1692,9 @@ async function startServer() {
             });
         });
 
-        await closeSessionsWatcher();
         // Clean up plugin processes on shutdown
         const shutdownPlugins = async () => {
+            await closeSessionsWatcher();
             await stopAllPlugins();
             process.exit(0);
         };

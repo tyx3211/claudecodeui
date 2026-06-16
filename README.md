@@ -135,6 +135,78 @@ CloudCLI UI is the open source UI layer that powers CloudCLI Cloud. You can self
 
 **🔒 Important Notice**: All Claude Code tools are **disabled by default**. This prevents potentially harmful operations from running automatically.
 
+## FTAI Shared-Host Fork Notes
+
+This fork carries a small set of changes for running CloudCLI on a shared Linux
+host and for using Claude Code as an auditable sub-agent behind an Anthropic
+compatible DeepSeek proxy.
+
+### Registration policy
+
+HTTP account registration is disabled by default. When no user exists,
+`GET /api/auth/status` returns `registrationDisabled: true`, and
+`POST /api/auth/register` returns `403`.
+
+To explicitly allow the original web setup flow, start the server with:
+
+```bash
+CLOUDCLI_ALLOW_HTTP_REGISTRATION=1 cloudcli
+```
+
+For shared-host deployments, create the single local user from the Linux shell
+instead:
+
+```bash
+DATABASE_PATH=/path/to/auth.db npm run cloudcli:create-user -- --username <name>
+```
+
+The script writes a bcrypt password hash directly to the local SQLite database;
+it never enables an unauthenticated HTTP registration path.
+
+### Claude Code with DeepSeek proxy
+
+The deployment is intended to use Claude Code settings such as:
+
+```json
+{
+  "apiKeyHelper": "tr -d '\\r\\n' < /path/to/deepseek-ft-api-key.txt",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://llm-proxy.ftai.chat",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro[1m]"
+  }
+}
+```
+
+CloudCLI provider auth recognizes `apiKeyHelper` as a valid Claude Code API-key
+configuration, and token telemetry prefers the SDK-reported `contextWindow`
+before falling back to `CONTEXT_WINDOW`.
+
+### Agent API permissions
+
+`POST /api/agent` accepts `permissionMode` for Claude and Codex providers. The
+default remains `bypassPermissions` so programmatic automation does not block on
+interactive permission prompts. Callers can pass `permissionMode: "default"` or
+another Claude Code mode when they want stricter behavior.
+
+### Codex-to-Claude sub-agent CLI
+
+This fork includes a thin TypeScript CLI that appends a prompt to a specified
+Claude Code session through CloudCLI instead of calling `claude` directly:
+
+```bash
+CLOUDCLI_API_KEY=<ck_...> npm run claude-subagent -- append \
+  --project-path /path/to/project \
+  --session-id <claude-session-id> \
+  --message-file /path/to/prompt.md
+```
+
+The CLI streams CloudCLI events to stdout and writes append-only JSONL audit logs
+under `~/experiment/cloudcli-subagent-audit` by default. The audit log records
+the prompt, target session, project path, model, permission mode, streamed
+events, and final session id.
+
 ### Enabling Tools
 
 To use Claude Code's full functionality, you'll need to manually enable tools:

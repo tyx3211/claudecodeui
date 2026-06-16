@@ -290,6 +290,32 @@ function readNumber(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function readConfiguredContextWindow() {
+  const parsed = parseInt(process.env.CONTEXT_WINDOW, 10);
+  return Number.isFinite(parsed) ? parsed : 160000;
+}
+
+function readModelUsageContextWindow(sdkMessage) {
+  if (!sdkMessage?.modelUsage || typeof sdkMessage.modelUsage !== 'object') {
+    return 0;
+  }
+
+  let largestContextWindow = 0;
+
+  for (const modelData of Object.values(sdkMessage.modelUsage)) {
+    if (!modelData || typeof modelData !== 'object') {
+      continue;
+    }
+
+    const contextWindow = readNumber(modelData.contextWindow ?? modelData.context_window);
+    if (contextWindow > largestContextWindow) {
+      largestContextWindow = contextWindow;
+    }
+  }
+
+  return largestContextWindow;
+}
+
 /**
  * Extracts token usage from SDK messages.
  * Prefers per-step `message.usage` (Claude message payload), then falls back
@@ -311,7 +337,7 @@ function extractTokenBudget(sdkMessage) {
     const inputTokens = directInputTokens + cacheTokens;
     const outputTokens = readNumber(messageUsage.output_tokens ?? messageUsage.outputTokens);
     const totalUsed = inputTokens + outputTokens;
-    const contextWindow = parseInt(process.env.CONTEXT_WINDOW, 10) || 160000;
+    const contextWindow = readModelUsageContextWindow(sdkMessage) || readConfiguredContextWindow();
 
     return {
       used: totalUsed,
@@ -343,7 +369,7 @@ function extractTokenBudget(sdkMessage) {
   const inputTokens = readNumber(modelData.cumulativeInputTokens ?? modelData.inputTokens);
   const outputTokens = readNumber(modelData.cumulativeOutputTokens ?? modelData.outputTokens);
   const totalUsed = inputTokens + outputTokens;
-  const contextWindow = parseInt(process.env.CONTEXT_WINDOW, 10) || 160000;
+  const contextWindow = readNumber(modelData.contextWindow ?? modelData.context_window) || readConfiguredContextWindow();
 
   return {
     used: totalUsed,

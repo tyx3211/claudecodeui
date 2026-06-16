@@ -16,6 +16,28 @@ import { IS_PLATFORM } from '../constants/config.js';
 import { normalizeProjectPath } from '../shared/utils.js';
 
 const router = express.Router();
+const AGENT_PERMISSION_MODES = new Set(['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan']);
+
+function readAgentPermissionMode(value, fallback = 'bypassPermissions') {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+
+  if (typeof value !== 'string') {
+    const error = new Error('permissionMode must be a string');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const permissionMode = value.trim();
+  if (!AGENT_PERMISSION_MODES.has(permissionMode)) {
+    const error = new Error(`permissionMode must be one of: ${Array.from(AGENT_PERMISSION_MODES).join(', ')}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return permissionMode;
+}
 
 /**
  * Middleware to authenticate agent API requests.
@@ -843,7 +865,7 @@ class ResponseCollector {
  *   }
  */
 router.post('/', validateExternalApiKey, async (req, res) => {
-  const { githubUrl, projectPath, message, provider = 'claude', model, githubToken, branchName, sessionId } = req.body;
+  const { githubUrl, projectPath, message, provider = 'claude', model, githubToken, branchName, sessionId, permissionMode } = req.body;
 
   // Parse stream and cleanup as booleans (handle string "true"/"false" from curl)
   const stream = req.body.stream === undefined ? true : (req.body.stream === true || req.body.stream === 'true');
@@ -948,13 +970,14 @@ router.post('/', validateExternalApiKey, async (req, res) => {
     // Start the appropriate session
     if (provider === 'claude') {
       console.log('🤖 Starting Claude SDK session');
+      const claudePermissionMode = readAgentPermissionMode(permissionMode, 'bypassPermissions');
 
       await queryClaudeSDK(message.trim(), {
         projectPath: finalProjectPath,
         cwd: finalProjectPath,
         sessionId: sessionId || null,
         model: model,
-        permissionMode: 'bypassPermissions' // Bypass all permissions for API calls
+        permissionMode: claudePermissionMode
       }, writer);
 
     } else if (provider === 'cursor') {
@@ -969,13 +992,14 @@ router.post('/', validateExternalApiKey, async (req, res) => {
       }, writer);
     } else if (provider === 'codex') {
       console.log('🤖 Starting Codex SDK session');
+      const codexPermissionMode = readAgentPermissionMode(permissionMode, 'bypassPermissions');
 
       await queryCodex(message.trim(), {
         projectPath: finalProjectPath,
         cwd: finalProjectPath,
         sessionId: sessionId || null,
         model: model || codexModels.DEFAULT,
-        permissionMode: 'bypassPermissions'
+        permissionMode: codexPermissionMode
       }, writer);
     } else if (provider === 'gemini') {
       console.log('✨ Starting Gemini CLI session');
@@ -1245,7 +1269,7 @@ router.post('/', validateExternalApiKey, async (req, res) => {
         writer.end();
       }
     } else if (!res.headersSent) {
-      res.status(500).json({
+      res.status(error.statusCode || 500).json({
         success: false,
         error: error.message
       });

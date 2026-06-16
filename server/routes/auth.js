@@ -6,13 +6,15 @@ import { generateToken, authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
 const db = getConnection();
+const allowHttpRegistration = process.env.CLOUDCLI_ALLOW_HTTP_REGISTRATION === '1';
 
 // Check auth status and setup requirements
 router.get('/status', async (req, res) => {
   try {
     const hasUsers = await userDb.hasUsers();
     res.json({ 
-      needsSetup: !hasUsers,
+      needsSetup: !hasUsers && allowHttpRegistration,
+      registrationDisabled: !allowHttpRegistration,
       isAuthenticated: false // Will be overridden by frontend if token exists
     });
   } catch (error) {
@@ -23,6 +25,12 @@ router.get('/status', async (req, res) => {
 
 // User registration (setup) - only allowed if no users exist
 router.post('/register', async (req, res) => {
+  if (!allowHttpRegistration) {
+    return res.status(403).json({
+      error: 'HTTP registration is disabled. Create the local user from the Linux shell.'
+    });
+  }
+
   try {
     const { username, password } = req.body;
     
